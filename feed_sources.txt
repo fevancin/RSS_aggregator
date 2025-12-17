@@ -1,0 +1,7 @@
+# Elenco di feed nel formato 'sorgente >>> url'.
+# Ogni riga che inizia con il carattere '#' viene ignorata.
+
+Yahoo Finance >>> https://finance.yahoo.com/news/rssindex
+Hacker News >>> https://news.ycombinator.com/rss
+Wall Street Journal >>> https://feeds.a.dj.com/rss/RSSMarketsMain.xml
+CNBC >>> https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839069

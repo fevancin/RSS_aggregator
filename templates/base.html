@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RSS Aggregator</title>
+    <meta name="author", content="Federico Vancini">
+    <meta name="description", content="A simple RSS data aggregator">
+    <meta name="application-name" content="RSS Aggregator">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+    <h1>RSS Aggregator</h1>
+    <form action="{{ url_for('search') }}" method="GET">
+        <input type="text" name="q" placeholder="Search For Keyword">
+        <button type="submit">Search</button>
+    </form>
+</header>
+{% block content %}{% endblock %}
+</body>
+</html>

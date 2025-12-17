@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+
+{% block content %}
+    <p><a href="{{ url_for('index') }}">Home</a></p>
+    <h2>Search Results For: {{ query }}</h2>
+    <div class="articles">
+        {% for article in articles %}
+            <article>
+                <h2><a href="{{ article[2] }}">{{ article[1] }}</a></h2>
+                <p>{{ article[3] }}</p>
+                <p>Source: {{ article[0] }}</p>
+            </article>
+        {% endfor %}
+    </div>
+{% endblock %}
