@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from time import mktime
 import argparse
 
+
 # Definizione degli argomenti a linea di comando
 argparser = argparse.ArgumentParser('RSS aggregator')
 argparser.add_argument('--feed-sources', type=str, required=False, default='feed_sources.txt', help='Input text file with all RSS sources.')
@@ -23,6 +24,7 @@ MAX_FEED_FILE_LINE_NUMBER = 100 # modificare questa costante se è necessario ag
 
 ARTICLES_PER_PAGE = 10 # valore utilizzato nella paginazione dei risultati
 
+FEED_REFRESH_DELAY = 60 # quantità di tempo in secondi che intercorrerà fra due refresh dei feed
 
 MAX_FEED_FILE_LINE_LENGTH = 1000
 MAX_SEARCH_QUERY_LENGTH = 1000
@@ -76,20 +78,22 @@ with open(feed_file_path, 'r') as file:
         RSS_FEEDS[feed_source] = feed_url
 
 
-# elenco degli articoli da presentare, in una lista di coppie (sorgente, articolo).
-# successivamente questa stessa lista verrà sovrascritta trasformando gli elementi in tuple
+# elenco degli articoli da presentare, in una lista di tuple
 # (sorgente, titolo, link all'articolo, timestamp normalizzato)
 articles = []
 
-# dato che la precedente lista sarà creata in multithreading, avrà bisogno di un lock
-thread_lock = threading.Lock()
+# la precedente lista sarà letta e modificata da diversi thread, quindi avrà bisogno di un lock
+article_thread_lock = threading.Lock()
+
 
 class RssParser(threading.Thread):
     
-    def __init__(self, source, url):
+    def __init__(self, source, url, article_list, thread_lock):
         threading.Thread.__init__(self)
         self.source = source
         self.url = url
+        self.thread_lock = thread_lock
+        self.article_list = article_list
 
     def run(self):
         
@@ -97,97 +101,159 @@ class RssParser(threading.Thread):
         parsed_feed = feedparser.parse(self.url)
 
         if parsed_feed.status != 200:
-            print(f'The request for \'{source}\' with url \'{url}\' has returned a status of {parsed_feed.status}')
+            print(f'The request for \'{self.source}\' with url \'{self.url}\' has returned a status of {parsed_feed.status}')
             return
 
         # ottenimento degli articoli in una variabile locale, per non stressare l'accesso alla risorsa comune 'articles'
         thread_local_data = threading.local()
         thread_local_data.thread_articles = []
 
-        entries = [(self.source, entry) for entry in parsed_feed.entries]
-        thread_local_data.thread_articles.extend(entries)
+        for entry in parsed_feed.entries:
+            
+            if 'title' in entry:
+                title = entry.title
+            else:
+                title = None
+            
+            if 'link' in entry:
+                link_url = entry.link
+            else:
+                link_url = None
+            
+            if 'published_parsed' in entry:
+                timestamp = entry.published_parsed
+            else:
+                timestamp = None
+            
+            # ogni articolo sarà memorizzato come tupla (sorgente, titolo, link all'articolo, timestamp normalizzato)
+            thread_local_data.thread_articles.append((self.source, title, link_url, datetime.fromtimestamp(mktime(timestamp), timezone.utc)))
         
         # aggiunta degli articoli alla lista comune a tutti i thread
-        if not thread_lock.acquire(blocking=True, timeout=10):
-            print(f'Feed with source \'{source}\' could not be appended in time.')
+        if not self.thread_lock.acquire(blocking=True, timeout=10):
+            print(f'Feed with source \'{self.source}\' could not be appended in time.')
         else:
-            articles.extend(thread_local_data.thread_articles)
-            thread_lock.release()
+            self.article_list.extend(thread_local_data.thread_articles)
+            self.thread_lock.release()
 
-# Creazione della lista di thread con ognuno il proprio feed RSS
-threads = []
-for source, url in RSS_FEEDS.items():
 
-    thread = RssParser(source, url)
-    threads.append(thread)
+# funzione che effettua il refresh della lista degli articoli (thread-safe)
+def refresh_articles():
 
-    # de-commentare queste righe se non si vuole il multithreading nel parsing RSS
-    # parsed_feed = feedparser.parse(url)
-    # entries = [(source, entry) for entry in parsed_feed.entries]
-    # articles.extend(entries)
+    global articles
+    global article_thread_lock
 
-for thread in threads:
-    thread.daemon = True
-    thread.start()
-for thread in threads:
-    thread.join(MAX_THREAD_WAIT_SECONDS)
+    # per non stressare l'accesso alla reale lista di articoli, si ricorre ad una lista temporanea locale
+    temp_article_list = []
 
-# ogni articolo sarà memorizzato come tupla (sorgente, titolo, link all'articolo, timestamp normalizzato)
-for i in range(len(articles)):
-
-    source = articles[i][0]
-    article = articles[i][1]
+    # dato che la lista temporanea di articoli sarà popolata in multithreading, avrà bisogno di un lock locale da condividere con ogni thread
+    temp_thread_lock = threading.Lock()
     
-    if 'title' in article:
-        title = article.title
+    # Creazione della lista di thread con ognuno il proprio feed RSS
+    threads = []
+    for source, url in RSS_FEEDS.items():
+
+        thread = RssParser(source, url, temp_article_list, temp_thread_lock)
+        threads.append(thread)
+
+        # de-commentare queste righe se non si vuole il multithreading nel parsing RSS
+        # (in tal caso bisogna eliminare anche le righe successive, dato che non vi sono più thread da joinare)
+        # parsed_feed = feedparser.parse(url)
+        # entries = [(source, entry) for entry in parsed_feed.entries]
+        # articles.extend(entries)
+
+    for thread in threads:
+        thread.daemon = True
+        thread.start()
+    for thread in threads:
+        thread.join(MAX_THREAD_WAIT_SECONDS) # se il thread non termina entro MAX_THREAD_WAIT_SECONDS viene ucciso
+
+    # ordinamento degli articoli a partire dal più recente
+    temp_article_list.sort(key=lambda x: x[3], reverse=True)
+
+    # modifica della reale lista di articoli
+    if not article_thread_lock.acquire(blocking=True, timeout=10):
+        print(f'Articles could not be accessed for refreshing in time.')
     else:
-        title = None
-    
-    if 'link' in article:
-        link_url = article.link
-    else:
-        link_url = None
-    
-    if 'published_parsed' in article:
-        timestamp = article.published_parsed
-    else:
-        timestamp = None
-    
-    articles[i] = (source, title, link_url, datetime.fromtimestamp(mktime(timestamp), timezone.utc))
+        articles = temp_article_list
+        article_thread_lock.release()
 
-# ordinamento degli articoli a partire dal più recente
-articles = sorted(articles, key=lambda x: x[3], reverse=True)
+
+# funzione che salva su file le informazioni degli articoli
+def save_articles(save_file_path):
+
+    global articles
+    global article_thread_lock
+
+    if save_file_path is None:
+        return
+
+    if not article_thread_lock.acquire(blocking=True, timeout=10):
+        print(f'Articles could not be accessed for saving in time.')
+    else:
+
+        if len(articles) == 0:
+            print('There are no articles to save')
+            return
+        
+        with open(save_file_path, 'w') as file:
+            for source, title, link_url, timestamp in articles:
+                file.write(f'{source}\t{timestamp}\t{title}\t{link_url}\n')
+        
+        article_thread_lock.release()
+
+
+# classe che gestisce l'aggiornamento ed il salvataggio su file periodico dei feed
+class RefreshArticlesTimer(threading.Timer):
+    def run(self):
+        while not self.finished.wait(self.interval):
+            refresh_articles()
+            save_articles(ARTICLE_SAVE_PATH)
 
 
 # creazione di un'app Flask
 app = Flask(__name__)
 
+
+# homepage con tutti gli articoli (paginati)
 @app.route('/')
 def index():
 
-    # paginazione dei risultati
-    page = request.args.get('page', 1, type=int)
-    total_article_number = len(articles)
+    global articles
+    global article_thread_lock
 
-    if page <= 0:
-        page = 1
-    max_page_number = total_article_number // ARTICLES_PER_PAGE
-    if page > max_page_number:
-        page = max_page_number
-    if total_article_number == 0:
-        page = 1
+    if not article_thread_lock.acquire(blocking=True, timeout=10):
+        print(f'Articles could not be accessed in time.')
+    else:
 
-    start = max(0, (page - 1) * ARTICLES_PER_PAGE)
-    end = min(total_article_number, start + ARTICLES_PER_PAGE)
-    paginated_articles = articles[start:end]
+        # paginazione dei risultati
+        page = request.args.get('page', 1, type=int)
+        total_article_number = len(articles)
+
+        if page <= 0:
+            page = 1
+        max_page_number = total_article_number // ARTICLES_PER_PAGE
+        if page > max_page_number:
+            page = max_page_number
+        if total_article_number == 0:
+            page = 1
+
+        start = max(0, (page - 1) * ARTICLES_PER_PAGE)
+        end = min(total_article_number, start + ARTICLES_PER_PAGE)
+        paginated_articles = articles[start:end]
+
+        article_thread_lock.release()
 
     return render_template('index.html',
         articles=paginated_articles,
         page=page, total_pages = total_article_number // ARTICLES_PER_PAGE + 1)
 
 
+# pagina di risposta successiva alla ricerca di una parola chiave
 @app.route('/search')
 def search():
+
+    global articles
+    global article_thread_lock
 
     # query contiene la stringa da ricercare nei titoli degli articoli
     query = request.args.get('q')
@@ -196,35 +262,31 @@ def search():
     if len(query) > MAX_SEARCH_QUERY_LENGTH:
         print(f'The query is too long!')
 
-    # selezione degli articoli attinenti alla query
-    results = [article for article in articles if query.lower() in article[1].lower()]
+    if not article_thread_lock.acquire(blocking=True, timeout=10):
+        print(f'Articles could not be accessed in time.')
+    else:
+
+        # selezione degli articoli attinenti alla query
+        results = [article for article in articles if query.lower() in article[1].lower()]
+
+        article_thread_lock.release()
 
     return render_template('search_results.html', articles=results, query=query)
 
 
-# funzione che salva su file tutte le informazioni raccolte dall'aggregatore
-def article_saving_thread(save_file_path, articles):
-    with open(save_file_path, 'w') as file:
-        for source, title, link_url, timestamp in articles:
-            file.write(f'{source}\t{timestamp}\t{title}\t{link_url}\n')
-
-
 if __name__ == '__main__':
 
-    # salvataggio delle informazioni degli articoli raccolte
-    if ARTICLE_SAVE_PATH is not None:
-        if len(articles) == 0:
-            print('There are no articles to save')
-        else:
-            file_saving_thread = threading.Thread(target=article_saving_thread, args=(ARTICLE_SAVE_PATH, articles))
-            file_saving_thread.daemon = True
-            file_saving_thread.start()
+    # popolamento iniziale della lista di articoli
+    refresh_articles()
+    save_articles(ARTICLE_SAVE_PATH)
+
+    # inizio dell'aggiornamento periodico dei feed
+    refresh_articles_timer = RefreshArticlesTimer(interval=FEED_REFRESH_DELAY, function=None)
+    refresh_articles_timer.start()
 
     # ATTENZIONE: il server è http e non https, per renderlo sicuro serve configurare i certificati...
     app.run()
     # app.run(debug=True)
 
-    # questa soluzione non mi pare molto elegante... aspetto un thread dopo che il server HTTP è partito.
-    # per qualche motivo creare un thread dedicato ad app.run() dell'applicazione Flask non funziona.
-    file_saving_thread.join(MAX_THREAD_WAIT_SECONDS)
+    refresh_articles_timer.cancel()
     print('Exiting application...')

@@ -17,3 +17,8 @@ Il file con le sorgenti dei feed deve presentare, per ogni riga, una coppia 'sor
 Eventuali righe vuote o che iniziano col carattere '#' sono ignorate.
 
 L'eventuale file di output conterrà una riga per ogni articolo raccolto, nella forma 'sorgente timestamp titolo link', con i vari token separati da un carattere di tabulazione.
+
+## Changelog
+
+- `17-12-2025`  Versione iniziale
+- `7-1-2026`    Aggiunta del refresh periodico dei feed
